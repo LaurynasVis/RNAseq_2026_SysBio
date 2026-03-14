@@ -1,3 +1,4 @@
 results/*
+raw_data_exercise_20260218/*
 .snakemake/*
 .DS_Store

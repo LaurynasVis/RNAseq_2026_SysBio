@@ -1,0 +1,9 @@
+samples: ["SRR15618897", "SRR15618896", "SRR15618895", "SRR15618890", "SRR15618889", "SRR15618887"]
+
+samplesheet: "/opt/students/laurynas.visockas/RNAseq_2026_SysBio/samplesheet.csv"
+
+input_path: "/opt/students/laurynas.visockas/RNAseq_2026_SysBio/raw_data_exercise_20260218"
+
+genome_index: "/opt/shared/SYSBIO/Mus_musculus.GRCm39/genome"
+
+gtf_file: "/opt/shared/SYSBIO/Mus_musculus.GRCm39/genome.gtf"
