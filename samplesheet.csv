@@ -1,13 +1,13 @@
-ID,phenotype
-SRR30401452, male_ctrl *
-SRR30401449, male_ctrl *
-SRR30401447, male_ctrl
-SRR30401471, female_ctrl
-SRR30401469, female_ctrl
-SRR30401467, female_ctrl
-SRR30401502, male_mdd
-SRR30401499, male_mdd
-SRR30401497, male_mdd
-SRR30401462, female_mdd
-SRR30401459, female_mdd
-SRR30401457, female_mdd
+ID,gender,phenotype
+SRR30401452,male,ctrl
+SRR30401449,male,ctrl
+SRR30401447,male,ctrl
+SRR30401471,female,ctrl
+SRR30401469,female,ctrl
+SRR30401467,female,ctrl
+SRR30401502,male,mdd
+SRR30401499,male,mdd
+SRR30401497,male,mdd
+SRR30401462,female,mdd
+SRR30401459,female,mdd
+SRR30401457,female,mdd
