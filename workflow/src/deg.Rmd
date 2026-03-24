@@ -46,14 +46,14 @@ head(count_matrix)
 ```
 
 Next, we load sample metadata and define the phenotype reference level.
-Setting WT as the reference ensures fold changes are interpreted relative to WT.
+Setting 'ctrl' as the reference ensures fold changes are interpreted relative to 'ctrl'.
 
 ```{r, include=TRUE}
 # Read sample metadata
 samplesheet <- fread(snakemake@input$samplesheet)
 
-# Make sure phenotype is a factor with a WT as reference
-samplesheet$phenotype <-  relevel(factor(samplesheet$phenotype), ref = "WT")
+# Make sure phenotype is a factor with a ctrl as reference
+samplesheet$phenotype <-  relevel(factor(samplesheet$phenotype), ref = "ctrl")
 head(samplesheet)
 ```
 
