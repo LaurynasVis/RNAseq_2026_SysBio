@@ -1,6 +1,5 @@
 samples: [
   "SRR30401452", 
-  "SRR30401449",
   "SRR30401447",
   "SRR30401471",
   "SRR30401469",
@@ -17,6 +16,6 @@ samplesheet: "/opt/students/laurynas.visockas/RNAseq_2026_SysBio/samplesheet.csv
 
 input_path: "/opt/students/laurynas.visockas/RNAseq_2026_SysBio/raw_data_exercise_20260218"
 
-genome_index: "/opt/shared/SYSBIO/Homo_sapiens.GRCh38/genome"
+genome_index: "/opt/shared/SYSBIO/Homo_sapiens.GRCh38/genome_tran"
 
 gtf_file: "/opt/shared/SYSBIO/Homo_sapiens.GRCh38/genome.gtf"
