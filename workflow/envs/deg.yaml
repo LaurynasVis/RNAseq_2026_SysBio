@@ -11,11 +11,12 @@ dependencies:
   - r-ggplot2
   - r-ggrepel
   - r-pheatmap
+  - r-hexbin
   - bioconductor-edger
   - bioconductor-deseq2
   - bioconductor-enhancedvolcano
   - bioconductor-clusterprofiler
-  - bioconductor-org.mm.eg.db
+  - bioconductor-org.Hs.eg.db
   - bioconductor-biomart
   - bioconductor-annotationdbi
   - conda-forge::r-msigdbr

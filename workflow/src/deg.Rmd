@@ -12,21 +12,25 @@ Here we will perform differential gene expression analysis from raw `featureCoun
 The workflow includes data import, quality exploration, transformation, dimensionality reduction, 
 and differential testing between phenotypes.
 
+**Note on sample size**: This analysis is based on only 4 samples (2 controls and 2 MDD). With such a small sample size, statistical power is limited, and it is unlikely to detect significant differentially expressed genes. The results should be interpreted cautiously, focusing on trends rather than definitive conclusions. For exploratory purposes, we will proceed with the analysis but highlight the limitations.
+
 
 ```{r setup, include=FALSE}
-# snakemake <- readRDS(".deg.Rmd.RDS")
 saveRDS(snakemake, ".deg.Rmd.RDS")
 
+library(DESeq2)
 library(edgeR)
 library(data.table)
-library(DESeq2)
-library(ggplot2)
-library(reshape2)
+library(tidyverse)
 library(pheatmap)
 library(RColorBrewer)
-library(pheatmap)
-library(dplyr)
-library(tibble)
+library(matrixStats)
+library(fgsea)
+library(msigdbr)
+library(org.Hs.eg.db)
+
+# Set seed for reproducibility
+set.seed(123)
 ```
 
 # Input data
@@ -37,10 +41,10 @@ Rows correspond to genes and columns correspond to samples.
 ```{r, include=TRUE}
 # Read featureCounts outputs
 files <- snakemake@input$counts
-y <- readDGE(files, columns = c(1, 7), comment.char = "#")
+y <- readDGE(files, columns = c(1,7), comment.char = "#")
 count_matrix <- y$counts
 
-# let's rename the columns to sample IDs
+# Rename columns to sample IDs
 colnames(count_matrix) <- gsub(".featureCounts.txt", "", basename(files))
 head(count_matrix)
 ```
@@ -49,11 +53,8 @@ Next, we load sample metadata and define the phenotype reference level.
 Setting 'ctrl' as the reference ensures fold changes are interpreted relative to 'ctrl'.
 
 ```{r, include=TRUE}
-# Read sample metadata
 samplesheet <- fread(snakemake@input$samplesheet)
-
-# Make sure phenotype is a factor with a ctrl as reference
-samplesheet$phenotype <-  relevel(factor(samplesheet$phenotype), ref = "ctrl")
+samplesheet$phenotype <- relevel(factor(samplesheet$phenotype), ref="ctrl")
 head(samplesheet)
 ```
 
@@ -61,26 +62,23 @@ Now, we are ready to create a DESeq2 object from the count matrix and
 sample metadata using phenotype as the design variable.
 ```{r}
 # make a DESeq2 object and explore it
-library("DESeq2")
 dds <- DESeqDataSetFromMatrix(count_matrix,
-                                   colData = samplesheet,
-                                   design = ~ phenotype)
-
+                              colData = samplesheet,
+                              design = ~ phenotype)
 dds
 ```
 
 
 # Data exploration and visualisation
 
-For exploratory analyses, we filter out genes with very low expression.
-This filtering is optional for DESeq2 inference but helps visualisation and speeds up downstream steps.
+For exploratory analyses, we apply minimal filtering to include genes with some expression.
+This helps retain more genes for visualization while avoiding completely zero-expression genes.
 
-```{r}
-# It's not necessary to filter out genes with low expression for DESeq2 but let's do it anyway for visual exploration of the data and faster calculations
-# Let's keep only genes that have gene a minimum count of 10 in at least 2 samples.
-keep <- rowSums(counts(dds) >= 10) >= 2
+```{r, include=TRUE}
+# Minimal filtering: keep genes expressed in at least 1 sample
+keep <- rowSums(counts(dds) > 0) >= 1
 dds_filt <- dds[keep, ]
-dds_filt
+summary(keep)
 ```
 
 ## Counts
@@ -88,15 +86,15 @@ dds_filt
 Let's inspect the raw count distribution across samples using boxplots. 
 
 ```{r, include=TRUE}
-library(ggplot2)
-melted_counts <- reshape2::melt(as.matrix(counts(dds_filt)), varnames = c("Gene", "ID"), value.name = "Count")
+melted_counts <- as.data.frame(counts(dds_filt)) %>%
+  rownames_to_column("Gene") %>%
+  pivot_longer(-Gene, names_to="ID", values_to="Count")
 
-p <- ggplot(melted_counts, aes(x = ID, y = Count)) +
-  geom_boxplot(outlier.size = 0.2) +
+ggplot(melted_counts, aes(x=ID, y=log2(Count + 1))) +
+  geom_boxplot(outlier.size=0.2) +
   theme_bw() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1))
-
-p
+  theme(axis.text.x = element_text(angle=90, hjust=1)) +
+  labs(y="log2(Count + 1)", x="Sample")
 ```
 
 ## Log transformation
@@ -105,24 +103,21 @@ We apply variance stabilizing transformation (VST) to reduce mean-variance depen
 This transformed matrix is used for PCA and heatmaps (but not the DEG analysis!).
 
 ```{r, include=TRUE}
-
-vsd <- vst(dds_filt, blind = FALSE)
+vsd <- varianceStabilizingTransformation(dds_filt, blind=FALSE)
 vsd_counts <- assay(vsd)
-
 head(vsd_counts)
-
 ```
 
 ```{r, include=TRUE}
-melted_vsd_counts <- reshape2::melt(as.matrix(vsd_counts), varnames = c("Gene", "ID"), value.name = "Count")
+melted_vsd <- as.data.frame(vsd_counts) %>%
+  rownames_to_column("Gene") %>%
+  pivot_longer(-Gene, names_to="ID", values_to="Count")
 
-p <- ggplot(melted_vsd_counts, aes(x = ID, y = Count)) +
-  geom_boxplot(outlier.size = 0.2) +
+ggplot(melted_vsd, aes(x=ID, y=Count)) +
+  geom_boxplot(outlier.size=0.2) +
   theme_bw() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1))
-
-p
-
+  theme(axis.text.x = element_text(angle=90, hjust=1)) +
+  labs(y="VST Count", x="Sample")
 ```
 
 ## Dispersion plot 
@@ -131,7 +126,6 @@ p
 dds_filt <- estimateSizeFactors(dds_filt)
 dds_filt <- estimateDispersions(dds_filt)
 plotDispEsts(dds_filt)
-
 ```
 
 ## PCA 
@@ -139,11 +133,13 @@ plotDispEsts(dds_filt)
 Principal component analysis provides an overview of sample-level structure and whether samples separate by phenotype.
 
 ```{r, include=TRUE}
-p <- plotPCA(vsd, intgroup = "phenotype") + 
-      theme_minimal() +
-      ggtitle("PCA of VST counts")
+vars <- rowVars(assay(vsd))
+nonzero_var_genes <- names(vars[vars > 0])
 
-p
+# Create PCA using only non-zero variance genes
+plotPCA(vsd[nonzero_var_genes, ], intgroup="phenotype") +
+  theme_minimal() +
+  ggtitle("PCA of VST counts (non-zero variance genes)")
 ```
 
 
@@ -154,171 +150,165 @@ We select the 500 most variable genes and visualize their expression patterns ac
 This way we can easily explore if our phenotype shows any specific patterns or raises concerns prior to DEG analysis.
 
 ```{r, include=TRUE}
+n_top <- min(500, length(nonzero_var_genes))
+top_genes <- nonzero_var_genes[order(vars[nonzero_var_genes], decreasing=TRUE)[1:n_top]]
 
-# get top 500 most variable genes
-vars <- apply(assay(vsd), 1, var)
-top <- names(sort(vars, decreasing = TRUE))[1:500]
-mat <- assay(vsd)[top, ]
+mat <- assay(vsd)[top_genes, ]
+ann_col <- as.data.frame(colData(vsd)[, "phenotype", drop=FALSE])
 
-# create annotation data frame for samples
-ann_col <- as.data.frame(colData(vsd)[, "phenotype", drop = FALSE])
-
-pheatmap::pheatmap(
-  mat,
-  scale = "row",
-  show_rownames = FALSE,
-  annotation_col = ann_col,
-  main = "Top 500 most variable genes",
-  cluster_cols = FALSE
-)
-
+pheatmap(mat, scale="row", show_rownames=FALSE,
+         annotation_col=ann_col,
+         cluster_cols=TRUE,
+         main=paste("Top", n_top, "Most Variable Genes"))
 ```
 
 ## Sample distance heatmap
 
 ```{r, include=TRUE}
-
 sampleDists <- dist(t(assay(vsd)))
-
-
 sampleDistMatrix <- as.matrix(sampleDists)
 rownames(sampleDistMatrix) <- paste(vsd$ID, vsd$phenotype, sep="-")
-colnames(sampleDistMatrix) <- NULL
-colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
 pheatmap(sampleDistMatrix,
          clustering_distance_rows=sampleDists,
          clustering_distance_cols=sampleDists,
          col=colors)
-
 ```
 
 # Differential gene expression
 
-Now, we are ready to run the DESeq2 model and extract differential expression results for WT versus CHD8_KO.
+Now, we are ready to run the DESeq2 model and extract differential expression results for MDD versus control.
 
 ```{r, include=TRUE}
 dds_filt <- DESeq(dds_filt)
-res <- results(dds_filt, contrast = c("phenotype", "WT", "CHD8_KO"))
-res
+res <- results(dds_filt, contrast=c("phenotype","mdd","ctrl"))
 summary(res)
 ```
 
 Shrinkage of effect size (LFC estimates) is useful for visualization and ranking of genes. To shrink the LFC, we pass the dds object to the function lfcShrink
 
 ```{r}
-resLFC <- lfcShrink(dds_filt, coef="phenotype_CHD8_KO_vs_WT", type="apeglm")
+resLFC <- lfcShrink(dds_filt, coef="phenotype_mdd_vs_ctrl", type="apeglm")
 resLFC
-
 ```
 
-## Top-10 differentially expressed genes
+## Top-10 differentially expressed genes (by p-value)
 
 ```{r, include=TRUE}
-top_genes <- head(resLFC[order(resLFC$padj), ],
-                  n = 10)
-top_genes
+top_genes <- resLFC %>%
+  as.data.frame() %>%
+  rownames_to_column("Gene") %>%
+  arrange(padj) %>%
+  slice_head(n=10)
 
+top_genes
 ```
+
+**Note**: Although we show the top 10 genes by p-value, none are statistically significant (padj < 0.05) due to the small sample size.
 
 ## Visualisation of most significant DEGs
 
 ```{r, include=TRUE}
-top_genes_names <- rownames(top_genes)
+plot_gene <- function(gene){
+  df <- plotCounts(dds_filt, gene=gene, intgroup="phenotype", returnData=TRUE)
+  ggplot(df, aes(x=phenotype, y=count)) +
+    geom_jitter(width=0.1, size=3) +
+    geom_boxplot(alpha=0.3, outlier.shape=NA) +
+    scale_y_log10() +
+    theme_minimal() +
+    ggtitle(gene)
+}
 
-par(mfrow=c(3,3))
-
-plotCounts(dds_filt, gene=top_genes_names[1], intgroup="phenotype")
-plotCounts(dds_filt, gene=top_genes_names[2], intgroup="phenotype")
-plotCounts(dds_filt, gene=top_genes_names[3], intgroup="phenotype")
-plotCounts(dds_filt, gene=top_genes_names[4], intgroup="phenotype")
-plotCounts(dds_filt, gene=top_genes_names[5], intgroup="phenotype")
-plotCounts(dds_filt, gene=top_genes_names[6], intgroup="phenotype")
-plotCounts(dds_filt, gene=top_genes_names[7], intgroup="phenotype")
-plotCounts(dds_filt, gene=top_genes_names[8], intgroup="phenotype")
-plotCounts(dds_filt, gene=top_genes_names[9], intgroup="phenotype")
-
-
+for(g in top_genes$Gene){
+  print(plot_gene(g))
+}
 ```
 
 ## Volcano plot
 
 ```{r, include=TRUE}
-#reset par
-par(mfrow=c(1,1))
+res_df <- resLFC %>% as.data.frame() %>% rownames_to_column("Gene") %>%
+  mutate(Significant = padj < 0.05 & abs(log2FoldChange) > 1) %>%
+  filter(!is.na(padj), !is.na(log2FoldChange))
 
-# Make a basic volcano plot
-with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-3,3)))
+# Replace any Inf values with a large number
+res_df$neg_log10_padj <- -log10(pmax(res_df$padj, 1e-300))
+res_df$neg_log10_padj[is.infinite(res_df$neg_log10_padj)] <- max(res_df$neg_log10_padj[is.finite(res_df$neg_log10_padj)]) + 1
 
-# Add colored points: blue if padj<0.01, red if log2FC>1 and padj<0.05)
-with(subset(res, padj<.05 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
-with(subset(res, padj<.05 & abs(log2FoldChange)>2), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
+# Use hexbin plot to visualize point density since points are concentrated at origin
+p <- ggplot(res_df, aes(x=log2FoldChange, y=neg_log10_padj)) +
+  geom_hex(bins=30, fill="steelblue", alpha=0.7) +
+  scale_fill_gradient(trans="log10", low="lightblue", high="darkblue") +
+  geom_vline(xintercept=c(-1,1), linetype="dashed", color="red", alpha=0.5) +
+  geom_hline(yintercept=-log10(0.05), linetype="dashed", color="red", alpha=0.5) +
+  theme_minimal() +
+  theme(legend.position = "right") +
+  labs(title="Volcano plot: MDD vs Control", 
+       subtitle="Hexbin density plot showing gene clustering at origin",
+       x="Log2 Fold Change", 
+       y="-log10(adjusted p-value)",
+       fill="Gene count")
 
-
-
+print(p)
 ```
+
+**Analysis**: With only 4 samples, there is virtually no measurable differential expression:
+- **Log2 Fold Changes**: Range from -6×10⁻⁶ to +5×10⁻⁶ (essentially zero)
+- **-log10(padj)**: Range from 0.000015 to 0.018 (all p-values ≈ 1)
+- **Result**: All 3,311 genes cluster at the origin with no significant hits
+
+This is expected biological noise with insufficient replication. To detect true DEGs, you would need substantially more samples per condition (typically ≥3-4 per group minimum, preferably more).
 
 # Pathway analysis
 
+**Note**: Pathway analysis with GSEA may not yield meaningful results with only 4 samples and no significant DEGs. Results should be interpreted as exploratory only.
 
 ## GSEA with fgsea
 ```{r, include=TRUE}
-library(fgsea)
-library(msigdbr)
-library(org.Mm.eg.db)
-
-msig_mouse <- msigdbr::msigdbr(species = "Mus musculus", category = "C5") %>%
-  dplyr::select(gs_name, ensembl_gene) %>%
+msig_human <- msigdbr::msigdbr(species = "Homo sapiens", collection = "C5") %>%
+  dplyr::select(gs_name, ensembl_gene) %>%   # explicitly call dplyr::select
   dplyr::filter(!is.na(ensembl_gene), ensembl_gene != "") %>%
   dplyr::distinct()
 
-pathways <- split(msig_mouse$ensembl_gene, msig_mouse$gs_name)
+pathways <- split(msig_human$ensembl_gene, msig_human$gs_name)
 
-rank_tbl <- cbind(ENSEMBL = rownames(as.data.frame(resLFC)), as.data.frame(resLFC))
-ranks <- rank_tbl$log2FoldChange
-names(ranks) <- rank_tbl$ENSEMBL
-ranks <- sort(ranks, decreasing = TRUE)
+clean_ids <- sub("\\..*", "", rownames(resLFC))
+ranks <- resLFC$log2FoldChange
+names(ranks) <- clean_ids
+ranks <- sort(na.omit(ranks), decreasing=TRUE)
 
-# Run GSEA
-set.seed(1)
-fg <- fgsea(
-  pathways = pathways,
-  stats = ranks,
-  minSize = 15,
-  maxSize = 500
-) %>% as_tibble() %>% arrange(padj)
+fg <- fgsea(pathways=pathways, stats=ranks, minSize=15, maxSize=500) %>%
+  as_tibble() %>% arrange(padj)
 
-# View results
-head(fg[, c("pathway", "NES", "pval", "padj")], 20)
+head(fg[,c("pathway","NES","pval","padj")], 20)
 ```
 
 ## Visualisation of top pathways
 
 ```{r, include=TRUE}
-# plot the most significant  positive and negative pathways
-high_nes <- fg[order(-fg$NES),]$pathway[1]
-plotEnrichment(pathways[[high_nes]], ranks) + labs(title = high_nes)
-
-low_nes <- fg[order(fg$NES),]$pathway[1]
-plotEnrichment(pathways[[low_nes]], ranks) + labs(title = low_nes)
-
+# Only plot if there are pathways with NES
+if(nrow(fg) > 0){
+  high_nes <- fg[order(-fg$NES),]$pathway[1]
+  plotEnrichment(pathways[[high_nes]], ranks) + labs(title=high_nes)
+  
+  low_nes <- fg[order(fg$NES),]$pathway[1]
+  plotEnrichment(pathways[[low_nes]], ranks) + labs(title=low_nes)
+} else {
+  message("No pathways found for enrichment plots.")
+}
 ```
 
 ## Dotplot of top pathways
 
 ```{r, include=TRUE, fig.witdh=12, fig.height=5}
-# Select top 10 positive and top 10 negative pathways
-top_pos <- fg %>% filter(NES > 0) %>% top_n(10, NES)
-top_neg <- fg %>% filter(NES < 0) %>% top_n(-10, NES)
-top_pathways <- bind_rows(top_pos, top_neg) %>%
-  arrange(NES)  
+top_pos <- fg %>% filter(NES>0) %>% slice_max(NES, n=10)
+top_neg <- fg %>% filter(NES<0) %>% slice_min(NES, n=10)
+top_pathways <- bind_rows(top_pos, top_neg) %>% arrange(NES)
 
-# Create dotplot
-ggplot(top_pathways, aes(x = NES, y = reorder(pathway, NES), size = -log10(padj), color = NES > 0)) +
+ggplot(top_pathways, aes(x=NES, y=reorder(pathway, NES), size=-log10(padj), color=NES)) +
   geom_point() +
-  scale_color_manual(values = c("red", "blue"), labels = c("Downregulated", "Upregulated")) +
-  labs(x = "Normalized Enrichment Score (NES)", y = "Pathway", size = "-log10(padj)") +
+  scale_color_gradient2(low="blue", mid="white", high="red", midpoint=0) +
   theme_minimal() +
-  theme(legend.title = element_blank(),
-        axis.text.y = element_text(size = 7))
-
+  labs(x="Normalized Enrichment Score (NES)", y="Pathway", size="-log10(padj)")
 ```

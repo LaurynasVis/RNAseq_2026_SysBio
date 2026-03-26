@@ -1,4 +1,7 @@
 results/*
 raw_data_exercise_20260218/*
+raw_data
 .snakemake/*
+Homo_sapiens.GRCh38
 .DS_Store
+.deg.Rmd.RDS

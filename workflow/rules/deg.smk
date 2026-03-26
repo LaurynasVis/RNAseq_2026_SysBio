@@ -1,6 +1,6 @@
 rule deg:
     input:
-        counts=expand("results/counts/{sample}.featureCounts.txt.summary",
+        counts = expand("results/counts/{sample}.featureCounts.txt",
             sample=config["samples"]),
         samplesheet = config["samplesheet"]
     output:
