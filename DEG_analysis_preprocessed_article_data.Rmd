@@ -1,0 +1,299 @@
+title: "Differential Gene Expression Analysis - MDD"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+```{r setup, include=FALSE}
+counts_file   <- snakemake@input$counts
+samplesheet_f <- snakemake@input$samplesheet
+SEX_TO_ANALYZE <- "male"
+
+library(data.table)
+library(DESeq2)
+library(ggplot2)
+library(reshape2)
+library(pheatmap)
+library(RColorBrewer)
+library(dplyr)
+library(tibble)
+library(stringr)
+library(ggrepel)
+```
+
+# Input data
+```{r load-counts}
+count_matrix_full <- read.table(gzfile(counts_file), header=TRUE,
+                                row.names=NULL, sep="\t", check.names=FALSE)
+rownames(count_matrix_full) <- make.unique(as.character(count_matrix_full[,1]))
+count_matrix_full <- count_matrix_full[,-1]
+cat("Full matrix dimensions:", dim(count_matrix_full), "\n")
+```
+```{r filter-input-cols}
+count_matrix <- count_matrix_full[, grepl("input", colnames(count_matrix_full))]
+colnames(count_matrix) <- gsub("_input", "", colnames(count_matrix))
+colnames(count_matrix) <- gsub("__", "_", colnames(count_matrix))
+cat("Input-only matrix dimensions:", dim(count_matrix), "\n")
+```
+```{r load-samplesheet}
+samplesheet <- fread(samplesheet_f)
+samplesheet_sex <- samplesheet[samplesheet$sex == SEX_TO_ANALYZE, ]
+matched <- samplesheet_sex$sample[samplesheet_sex$sample %in% colnames(count_matrix)]
+samplesheet_sex <- samplesheet_sex[samplesheet_sex$sample %in% matched, ]
+count_matrix_sex <- count_matrix[, matched]
+samplesheet_sex$condition <- relevel(factor(samplesheet_sex$condition), ref = "control")
+cat("Sample groups:\n")
+print(table(samplesheet_sex$condition))
+```
+```{r create-dds}
+dds <- DESeqDataSetFromMatrix(countData = count_matrix_sex,
+                               colData = samplesheet_sex, design = ~ condition)
+keep <- rowSums(counts(dds) >= 10) >= 2
+dds_filt <- dds[keep, ]
+cat("Genes after filtering:", nrow(dds_filt), "\n")
+```
+
+# Data exploration
+
+## Raw counts
+```{r boxplot-raw}
+melted <- reshape2::melt(as.matrix(counts(dds_filt)),
+                         varnames=c("Gene","ID"), value.name="Count")
+ggplot(melted, aes(x=ID, y=Count, fill=ID)) +
+  geom_boxplot(outlier.size=0.2, show.legend=FALSE) + theme_bw() +
+  theme(axis.text.x=element_text(angle=90, hjust=1, size=7)) +
+  ggtitle(paste0("Raw counts - ", SEX_TO_ANALYZE))
+```
+
+## VST
+```{r vst}
+vsd <- vst(dds_filt, blind=FALSE)
+melted_vsd <- reshape2::melt(as.matrix(assay(vsd)),
+                              varnames=c("Gene","ID"), value.name="Count")
+ggplot(melted_vsd, aes(x=ID, y=Count, fill=ID)) +
+  geom_boxplot(outlier.size=0.2, show.legend=FALSE) + theme_bw() +
+  theme(axis.text.x=element_text(angle=90, hjust=1, size=7)) +
+  ggtitle(paste0("VST counts - ", SEX_TO_ANALYZE))
+```
+
+## Dispersion
+```{r dispersion}
+dds_filt <- estimateSizeFactors(dds_filt)
+dds_filt <- estimateDispersions(dds_filt)
+plotDispEsts(dds_filt)
+```
+
+## PCA
+```{r pca}
+plotPCA(vsd, intgroup="condition") + theme_minimal() +
+  scale_color_manual(values=c("control"="#2166AC","MDD"="#D6604D")) +
+  ggtitle(paste0("PCA - ", SEX_TO_ANALYZE)) +
+  theme(legend.title=element_blank())
+```
+
+## Top 500 heatmap
+```{r heatmap-top500}
+vars <- apply(assay(vsd), 1, var)
+top500 <- names(sort(vars, decreasing=TRUE))[1:500]
+mat <- assay(vsd)[top500,]
+ann_col <- as.data.frame(colData(vsd)[,"condition",drop=FALSE])
+pheatmap::pheatmap(mat, scale="row", show_rownames=FALSE,
+  annotation_col=ann_col,
+  annotation_colors=list(condition=c(control="#2166AC",MDD="#D6604D")),
+  main=paste0("Top 500 variable genes - ", SEX_TO_ANALYZE),
+  cluster_cols=TRUE, fontsize_col=7)
+```
+
+## Sample distances
+```{r heatmap-dist}
+sampleDists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(colnames(vsd), vsd$condition, sep=" - ")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9,"Blues")))(255)
+pheatmap(sampleDistMatrix, clustering_distance_rows=sampleDists,
+  clustering_distance_cols=sampleDists, col=colors,
+  main=paste0("Sample distances - ", SEX_TO_ANALYZE), fontsize_row=7)
+```
+
+# Differential gene expression
+```{r run-deseq2}
+dds_filt <- DESeq(dds_filt)
+res <- results(dds_filt, contrast=c("condition","MDD","control"), alpha=0.05)
+summary(res)
+resLFC <- lfcShrink(dds_filt, coef="condition_MDD_vs_control", type="apeglm")
+```
+```{r sig-genes}
+sig_genes <- as.data.frame(res) %>%
+  rownames_to_column("gene") %>%
+  filter(!is.na(pvalue), pvalue < 0.05, abs(log2FoldChange) > log2(1.2))
+cat("Total DEGs:", nrow(sig_genes), "\n")
+cat("Up:", sum(sig_genes$log2FoldChange > 0), "\n")
+cat("Down:", sum(sig_genes$log2FoldChange < 0), "\n")
+```
+
+## Top 10 DEGs
+```{r top10}
+top_genes <- sig_genes %>% arrange(pvalue) %>% head(10)
+print(top_genes[, c("gene","baseMean","log2FoldChange","pvalue","padj")])
+```
+
+## Count plots
+```{r count-plots, fig.width=12, fig.height=8}
+par(mfrow=c(3,3))
+for(g in top_genes$gene[1:min(9,nrow(top_genes))]) {
+  tryCatch(plotCounts(dds_filt, gene=g, intgroup="condition", main=g,
+                      col=c("#2166AC","#D6604D")), error=function(e) NULL)
+}
+par(mfrow=c(1,1))
+```
+
+## Volcano plot
+```{r volcano, fig.width=9, fig.height=6}
+res_df <- as.data.frame(res) %>%
+  rownames_to_column("gene") %>% filter(!is.na(pvalue)) %>%
+  mutate(significant = pvalue < 0.05 & abs(log2FoldChange) > log2(1.2))
+
+ggplot(res_df, aes(x=log2FoldChange, y=-log10(pvalue), color=significant)) +
+  geom_point(size=0.8, alpha=0.6) +
+  scale_color_manual(values=c("FALSE"="grey70","TRUE"="#D6604D")) +
+  geom_vline(xintercept=c(-log2(1.2),log2(1.2)), linetype="dashed", linewidth=0.3) +
+  geom_hline(yintercept=-log10(0.05), linetype="dashed", linewidth=0.3) +
+  xlim(-4,4) + theme_bw() + theme(legend.title=element_blank()) +
+  labs(title=paste0("Volcano - ", SEX_TO_ANALYZE, " MDD vs control"),
+       subtitle=paste0(nrow(sig_genes), " DEGs (p<0.05, FC>1.2)"),
+       x="Log2 Fold Change", y="-log10(p-value)")
+```
+
+# Pathway analysis
+```{r gsea, message=FALSE, warning=FALSE}
+library(fgsea)
+library(msigdbr)
+library(org.Hs.eg.db)
+
+msig_human <- msigdbr::msigdbr(species="Homo sapiens", category="C5") %>%
+  dplyr::select(gs_name, gene_symbol) %>% dplyr::distinct()
+pathways <- split(msig_human$gene_symbol, msig_human$gs_name)
+
+rank_tbl <- as.data.frame(res) %>% rownames_to_column("gene") %>%
+  filter(!is.na(pvalue), !is.na(log2FoldChange)) %>%
+  mutate(rank_stat = -log10(pvalue) * sign(log2FoldChange))
+ranks <- setNames(rank_tbl$rank_stat, rank_tbl$gene)
+ranks <- sort(ranks, decreasing=TRUE)
+
+set.seed(1)
+fg <- fgsea(pathways=pathways, stats=ranks, minSize=15, maxSize=500) %>%
+  as_tibble() %>% arrange(pval)
+print(head(fg[,c("pathway","NES","pval","padj")], 20))
+```
+
+## Dotplot
+```{r dotplot, fig.width=14, fig.height=7}
+top_pos <- fg %>% filter(NES>0, pval<0.05) %>% slice_max(NES, n=15)
+top_neg <- fg %>% filter(NES<0, pval<0.05) %>% slice_min(NES, n=15)
+top_p <- bind_rows(top_pos, top_neg) %>% arrange(NES)
+
+if(nrow(top_p) == 0) {
+  top_p <- bind_rows(fg %>% filter(NES>0) %>% slice_max(NES,n=10),
+                     fg %>% filter(NES<0) %>% slice_min(NES,n=10)) %>% arrange(NES)
+}
+
+top_p$pathway_short <- str_trunc(gsub("GOBP_|GOCC_|GOMF_","",top_p$pathway), 55)
+
+ggplot(top_p, aes(x=NES, y=reorder(pathway_short,NES),
+                   size=-log10(pval), color=NES>0)) +
+  geom_point() +
+  scale_color_manual(values=c("TRUE"="#2166AC","FALSE"="#D6604D"),
+    labels=c("TRUE"="Upregulated","FALSE"="Downregulated")) +
+  geom_vline(xintercept=0, linetype="dashed", color="grey50") +
+  labs(x="NES", y="Pathway",
+       title=paste0("GSEA - ", SEX_TO_ANALYZE, " MDD vs control")) +
+  theme_minimal() +
+  theme(axis.text.y=element_text(size=7), legend.title=element_blank())
+```
+
+# Male vs Female comparison
+```{r comparison, warning=FALSE, message=FALSE}
+# Reload FULL count matrix for both sexes
+count_matrix_all <- read.table(gzfile(counts_file), header=TRUE,
+                               row.names=NULL, sep="\t", check.names=FALSE)
+rownames(count_matrix_all) <- make.unique(as.character(count_matrix_all[,1]))
+count_matrix_all <- count_matrix_all[,-1]
+count_matrix_all <- count_matrix_all[, grepl("input", colnames(count_matrix_all))]
+colnames(count_matrix_all) <- gsub("_input","", colnames(count_matrix_all))
+colnames(count_matrix_all) <- gsub("__","_", colnames(count_matrix_all))
+
+run_deseq_sex <- function(sex, cm_full, ss_full) {
+  ss  <- ss_full[ss_full$sex == sex, ]
+  matched <- ss$sample[ss$sample %in% colnames(cm_full)]
+  ss  <- ss[ss$sample %in% matched, ]
+  cm  <- cm_full[, matched]
+  ss$condition <- relevel(factor(ss$condition), ref="control")
+  dds <- DESeqDataSetFromMatrix(countData=cm, colData=ss, design=~condition)
+  keep <- rowSums(counts(dds) >= 10) >= 2
+  dds <- dds[keep,]
+  dds <- DESeq(dds, quiet=TRUE)
+  res <- results(dds, contrast=c("condition","MDD","control"), alpha=0.05)
+  sig <- as.data.frame(res) %>% rownames_to_column("gene") %>%
+    filter(!is.na(pvalue), pvalue<0.05, abs(log2FoldChange)>log2(1.2))
+  cat(sex, "- n samples:", nrow(ss), "| DEGs:", nrow(sig),
+      "| Up:", sum(sig$log2FoldChange>0),
+      "| Down:", sum(sig$log2FoldChange<0), "\n")
+  list(res=res, sig=sig)
+}
+
+samplesheet_all <- fread(samplesheet_f)
+res_male   <- run_deseq_sex("male",   count_matrix_all, samplesheet_all)
+res_female <- run_deseq_sex("female", count_matrix_all, samplesheet_all)
+
+shared      <- intersect(res_male$sig$gene, res_female$sig$gene)
+only_male   <- setdiff(res_male$sig$gene,   res_female$sig$gene)
+only_female <- setdiff(res_female$sig$gene, res_male$sig$gene)
+cat("Shared:", length(shared), "| Male-only:", length(only_male),
+    "| Female-only:", length(only_female), "\n")
+only_female <- setdiff(res_female$sig$gene, res_male$sig$gene)
+cat("Shared:", length(shared), "| Male-only:", length(only_male),
+    "| Female-only:", length(only_female), "\n")
+```
+
+## DEG count barplot
+```{r barplot-comparison}
+deg_summary <- data.frame(
+  Sex = rep(c("Male","Female"), each=2),
+  Direction = rep(c("Upregulated","Downregulated"), 2),
+  Count = c(sum(res_male$sig$log2FoldChange>0),
+            sum(res_male$sig$log2FoldChange<0),
+            sum(res_female$sig$log2FoldChange>0),
+            sum(res_female$sig$log2FoldChange<0))
+)
+ggplot(deg_summary, aes(x=Sex, y=Count, fill=Direction)) +
+  geom_bar(stat="identity", position="dodge") +
+  scale_fill_manual(values=c("Upregulated"="#D6604D","Downregulated"="#2166AC"), labels=c("Upregulated"="Upregulated (MDD > ctrl)","Downregulated"="Downregulated (MDD < ctrl)")) +
+  theme_bw() +
+  labs( y="Number of DEGs", x="") +
+  theme(legend.title=element_blank())
+```
+
+## Side-by-side volcano
+```{r volcano-comparison, fig.width=14, fig.height=5}
+make_v <- function(res, sex) {
+  as.data.frame(res) %>% rownames_to_column("gene") %>%
+    filter(!is.na(pvalue)) %>%
+    mutate(sex=sex, sig=pvalue<0.05 & abs(log2FoldChange)>log2(1.2))
+}
+v_both <- bind_rows(make_v(res_male$res,"Male"), make_v(res_female$res,"Female"))
+
+ggplot(v_both, aes(x=log2FoldChange, y=-log10(pvalue), color=sig)) +
+  geom_point(size=0.6, alpha=0.5) +
+  scale_color_manual(values=c("FALSE"="grey70","TRUE"="#D6604D")) +
+  facet_wrap(~sex) +
+  geom_vline(xintercept=c(-log2(1.2),log2(1.2)), linetype="dashed", linewidth=0.3) +
+  geom_hline(yintercept=-log10(0.05), linetype="dashed", linewidth=0.3) +
+  xlim(-4,4) + theme_bw() + theme(legend.title=element_blank()) +
+  labs(title="MDD vs Control - Male and Female comparison",
+       x="Log2 Fold Change", y="-log10(p-value)")
+```
+```{r session-info}
+sessionInfo()
+```
